@@ -596,28 +596,10 @@ Object.assign(ChatApp.prototype, {
   async newSession() {
     this._disconnectWS();
     this._clearChat();
+    this.sessionId = null;
     try {
-      const r = await this._fetchAuth('/api/prompt', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({prompt: '', session_id: ''}),
-      });
-      const data = await r.json();
-      if (r.ok && data.session_id) {
-        this.sessionId = data.session_id;
-        // If the user is "in" a folder, drop the new session into it.
-        const fid = this._getActiveFolderId();
-        if (fid) {
-          try {
-            await this._fetchAuth(
-              `/api/sessions/${data.session_id}/folder`, {
-                method: 'PATCH',
-                headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({folder_id: fid}),
-              });
-          } catch(e) { /* non-fatal — session still exists, just ungrouped */ }
-        }
-        this._connectWS(this.sessionId);
+      const sid = await this._ensureSession();
+      if (sid) {
         this._showWelcome();
       }
     } catch(e) { console.error('newSession:', e); }

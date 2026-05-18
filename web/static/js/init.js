@@ -3,8 +3,8 @@
 
 const app = new ChatApp();
 app.initTheme();
-app._yolo = true;  // YOLO mode enabled — auto-approve all tool calls
-app._updateYoloBtn();
+app._permissionMode = 'accept-all';
+app.setYolo(true);  // YOLO mode enabled — auto-approve all tool calls
 app.bootstrap();
 app._showWelcome();
 
