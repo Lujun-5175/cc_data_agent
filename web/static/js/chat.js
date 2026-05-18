@@ -782,6 +782,71 @@ class ChatApp {
     this._toolSummaryEl = null;
   }
 
+  _finalizeTurnSummary() {
+    const thinkingText = (this._thinkBuf || '').trim();
+    const toolEntries = Array.isArray(this._toolSummary)
+      ? this._toolSummary.map((entry) => ({...entry}))
+      : [];
+    const hasThinking = !!thinkingText;
+    const hasTools = toolEntries.length > 0;
+    if (!hasThinking && !hasTools) return;
+
+    const card = document.createElement('details');
+    card.className = 'tool-summary-card turn-summary-card';
+    card.innerHTML = `
+      <summary>
+        <span class="tool-arrow">&#9654;</span>
+        <span class="tool-summary-icon">&#9776;</span>
+        <span class="tool-summary-label">Turn summary</span>
+        <span class="tool-summary-count">${hasThinking && hasTools ? 'thinking + tools' : hasThinking ? 'thinking' : `tools ${toolEntries.length}`}</span>
+      </summary>
+      <div class="tool-summary-body"></div>`;
+
+    const body = card.querySelector('.tool-summary-body');
+    if (hasThinking) {
+      const think = document.createElement('div');
+      think.className = 'ts-row done';
+      think.style.display = 'block';
+      think.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+          <span class="ts-icon done">&#129504;</span>
+          <span class="ts-name">Thinking</span>
+        </div>
+        <div style="white-space:pre-wrap;color:var(--text-dim);line-height:1.5;padding-left:24px;">${this._esc(thinkingText)}</div>`;
+      body.appendChild(think);
+    }
+    if (hasThinking && hasTools) {
+      const divider = document.createElement('div');
+      divider.style.cssText = 'height:1px;background:var(--border);margin:10px 0;';
+      body.appendChild(divider);
+    }
+    if (hasTools) {
+      const toolsWrap = document.createElement('div');
+      toolsWrap.innerHTML = toolEntries.map((e) => {
+        const icon = e.status === 'running'
+          ? '<span class="ts-spinner"></span>'
+          : e.status === 'denied'
+            ? '<span class="ts-icon denied">&#10006;</span>'
+            : '<span class="ts-icon done">&#10003;</span>';
+        const preview = e.inputs
+          ? (typeof e.inputs === 'string' ? e.inputs : JSON.stringify(e.inputs)).split('\n')[0].slice(0, 80)
+          : '';
+        const resultPreview = e.result ? e.result.split('\n')[0].slice(0, 100) : '';
+        return `<div class="ts-row ${this._esc(e.status || 'done')}">
+          ${icon}
+          <span class="ts-name">${this._esc(e.name)}</span>
+          <span class="ts-preview">${this._esc(preview)}</span>
+          ${resultPreview ? `<span class="ts-result">&#8594; ${this._esc(resultPreview)}</span>` : ''}
+        </div>`;
+      }).join('');
+      body.appendChild(toolsWrap);
+    }
+
+    document.getElementById('messages').appendChild(card);
+    if (this._thinkEl) this._thinkEl.remove();
+    if (this._toolSummaryEl) this._toolSummaryEl.remove();
+  }
+
   _finishTurn(tokIn, tokOut) {
     // If thinking was shown but no assistant bubble was created (text_chunks
     // were lost — e.g. after WS reconnect replay guard drops them), fetch the
@@ -790,6 +855,7 @@ class ChatApp {
 
     this._removeActivity();
     this.streaming = false;
+    this._finalizeTurnSummary();
     this._curMsgEl = null;
     this._thinkEl = null;
     this._thinkBuf = '';
