@@ -1,0 +1,24 @@
+pos=6401
+updateConfig('model', model);
+    document.getElementById('sp-current-model').textContent = model;
+    document.querySelectorAll('.sp-model-item').forEach(el => {
+      el.classList.toggle('active', el.textContent.trim() === model.split('/').pop());
+    });
+  },
+
+  async toggleConfig(key) {
+    const el = document.getElementById('sp-' + key);
+    const isOn = el.classList.contains('on');
+    await this.updateConfig(key, !isOn);
+    el.classList.toggle('on');
+  },
+
+  async updateConfig(key, value) {
+    if (!this.sessionId) return;
+    try {
+      await this._fetchAuth('/api/config', {
+        method: 'PATCH',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({session_id: this.sessionId, config: {[key]: value}}),
+      });
+    } catch(e) { console.error('upd

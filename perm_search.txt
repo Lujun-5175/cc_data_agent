@@ -1,0 +1,25 @@
+D:\cc data agent:592:def _check_permission(tc: dict, config: dict) -> bool:
+D:\cc data agent:631:def _permission_desc(tc: dict) -> str:
+D:\cc data agent:312:    def _handle_permission_request(self, event) -> str:
+D:\cc data agent:904:    def _handle_permission_request(self, event) -> str:
+D:\cc data agent:230:    cmd_permissions, cmd_cwd, _interactive_ollama_picker,
+D:\cc data agent:326:def ask_permission_interactive(desc: str, config: dict) -> bool:
+D:\cc data agent:424:    "permissions": cmd_permissions,
+D:\cc data agent\cc_daemon:19:def register(registry: RpcRegistry, store: permission.PermissionStore) -> None:
+D:\cc data agent\cc_daemon:32:    def permission_demo(params: dict, ctx: CallContext) -> dict:
+D:\cc data agent\cc_daemon:53:    def permission_answer(params: dict, ctx: CallContext) -> dict:
+D:\cc data agent\cc_daemon:63:    def permission_refresh_timeout(params: dict, ctx: CallContext) -> dict:
+D:\cc data agent\cc_daemon:69:    def permission_list(_params: dict, ctx: CallContext) -> dict:
+D:\cc data agent\cc_daemon:116:    def answer(self, request_id: str, client_id: str, result: dict) -> PermissionRequest:
+D:\cc data agent\cc_daemon:159:    def get(self, request_id: str) -> Optional[PermissionRequest]:
+D:\cc data agent\cc_daemon:163:    def list_pending_for(self, client_id: str) -> list[PermissionRequest]:
+D:\cc data agent\commands:154:def cmd_permissions(args: str, _state, config) -> bool:
+D:\cc data agent\tests:255:    def test_real_runner_permission_routing_round_trip(self):
+D:\cc data agent\tests:159:def test_headless_run_query_handles_permission_request(monkeypatch):
+D:\cc data agent\tests:141:def test_permission_originator_only_unit():
+D:\cc data agent\tests:152:def test_permission_default_timeout_is_30min():
+D:\cc data agent\tests:214:def test_permission_not_originator_returns_403(daemon_tcp):
+D:\cc data agent\tests:58:def test_plan_mode_absent_when_permission_mode_not_plan():
+D:\cc data agent\tests:70:    def fake_execute(name, inputs, permission_mode="auto", config=None):
+D:\cc data agent\web:78:            ("permissions", "cmd_permissions"), ("cwd", "cmd_cwd"),
+D:\cc data agent\web:824:    def approve_permission(self, granted: bool):

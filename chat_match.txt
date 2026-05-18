@@ -1,0 +1,45 @@
+12:  // theme. Keep in sync with initTheme() in /static/js/settings.js.
+67:/* ── Explicit overrides (user clicked the toggle) ───────────── */
+94:#sidebar, #main, #topbar, #input-area, #settings-panel, .tool-card, .approval-card,
+96:.sp-select, .sp-input, .sp-toggle, .sess-item {
+449:#input-row { display:flex; gap:8px; align-items:flex-end; }
+457:#img-btn {
+463:#img-btn:hover { border-color:var(--accent); color:var(--accent); background:var(--surface); }
+464:#img-btn.has-img { border-color:var(--accent); color:var(--accent); background:var(--accent-dim); }
+475:#img-preview-bar {
+478:#img-preview-bar.has-img { display:flex; }
+479:#img-preview-bar .thumb {
+483:#img-preview-bar .thumb img { display:block; max-width:100%; max-height:80px; object-fit:contain; }
+484:#img-preview-bar .thumb .remove-img {
+490:#img-preview-bar .thumb .remove-img:hover { background:var(--red); }
+491:#img-preview-bar .img-label { font-size:11px; color:var(--text-muted); white-space:nowrap; }
+493:/* ── Settings panel ───────────────────────────────────────────── */
+494:#settings-panel {
+500:#settings-panel.open { display:block; transform:translateX(0); }
+501:#settings-panel .sp-hdr {
+505:#settings-panel .sp-hdr h3 { font-size:15px; color:var(--accent); }
+506:#settings-panel .sp-close {
+522:.sp-toggle {
+526:.sp-toggle.on { background:var(--green); }
+527:.sp-toggle::after {
+531:.sp-toggle.on::after { left:18px; }
+560:#topbar .settings-btn {
+564:#topbar .settings-btn:hover { border-color:var(--accent); color:var(--accent); }
+603:      <a href="#" id="auth-toggle-link" onclick="app.toggleAuthMode(event)"
+616:      <button class="select-btn" id="select-btn" onclick="app.toggleSelectMode()"
+644:    <button class="menu-btn" onclick="document.getElementById('sidebar').classList.toggle('open')">&#9776;</button>
+649:      <button class="settings-btn" onclick="app.toggleTheme()" id="theme-btn" title="Toggle theme">&#9790;</button>
+650:      <button class="settings-btn" onclick="app.toggleSettings()" title="Settings">&#9881;</button>
+660:    <div id="img-preview-bar"></div>
+661:    <div id="input-row">
+663:      <button id="img-btn" onclick="document.getElementById('img-file-input').click()" title="Attach image">&#128247;</button>
+670:<!-- Settings Panel -->
+671:<div id="settings-panel">
+673:    <h3>Settings</h3>
+674:    <button class="sp-close" onclick="app.toggleSettings()">&times;</button>
+684:  <!-- Toggles -->
+688:      <label>Permission Mode</label>
+689:      <select class="sp-select" id="sp-permission" onchange="app.updateConfig('permission_mode', this.value)">
+697:      <div class="sp-toggle" id="sp-thinking" onclick="app.toggleConfig('thinking')"></div>
+701:      <div class="sp-toggle" id="sp-verbose" onclick="app.toggleConfig('verbose')"></div>
+754:<script src="/static/js/settings.js"></script>
