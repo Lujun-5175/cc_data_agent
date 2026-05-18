@@ -38,10 +38,51 @@ class ChatApp {
 
   // ── Send prompt ─────────────────────────────────────────────────
 
+  async _ensureSession() {
+    if (this.sessionId) return this.sessionId;
+    const r = await this._fetchAuth('/api/prompt', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({prompt: '', session_id: ''})
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `Server error (${r.status})`);
+    this.sessionId = data.session_id;
+    try {
+      await this._fetchAuth('/api/config', {
+        method: 'PATCH',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          session_id: this.sessionId,
+          config: {
+            permission_mode: this._permissionMode || (this._yolo ? 'accept-all' : 'auto'),
+          },
+        }),
+      });
+    } catch(e) { /* non-fatal */ }
+    const fid = this._getActiveFolderId && this._getActiveFolderId();
+    if (fid) {
+      try {
+        await this._fetchAuth(`/api/sessions/${data.session_id}/folder`, {
+          method: 'PATCH',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({folder_id: fid}),
+        });
+      } catch(e) { /* non-fatal */ }
+    }
+    this._connectWS(this.sessionId);
+    this.loadSessions();
+    return this.sessionId;
+  }
+
   async send() {
     const input = document.getElementById('prompt-input');
     const text = input.value.trim();
     if (!text) return;
+    if (this._pendingFiles.some((f) => f.status === 'uploading')) {
+      this._addError('Please wait for file uploads to finish.');
+      return;
+    }
     input.value = '';
     input.style.height = 'auto';
 
@@ -51,49 +92,7 @@ class ChatApp {
 
     let restoreAttachments = () => {};
     try {
-      if (!this.sessionId) {
-        const r = await this._fetchAuth('/api/prompt', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({prompt: '', session_id: ''})
-        });
-        const data = await r.json();
-        if (!r.ok) {
-          input.value = text;
-          this._addError(data.error || `Server error (${r.status})`);
-          return;
-        }
-        this.sessionId = data.session_id;
-        // Sync the freshly created server session to the current UI
-        // preference. Otherwise a user who toggles YOLO before the first
-        // prompt can end up with the backend still on its default mode.
-        try {
-          await this._fetchAuth('/api/config', {
-            method: 'PATCH',
-            headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({
-              session_id: this.sessionId,
-              config: {
-                permission_mode: this._permissionMode || (this._yolo ? 'accept-all' : 'auto'),
-              },
-            }),
-          });
-        } catch(e) { /* non-fatal */ }
-        // If user is "in" a folder, drop the auto-created session there.
-        const fid = this._getActiveFolderId && this._getActiveFolderId();
-        if (fid) {
-          try {
-            await this._fetchAuth(
-              `/api/sessions/${data.session_id}/folder`, {
-                method: 'PATCH',
-                headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({folder_id: fid}),
-              });
-          } catch(e) { /* non-fatal */ }
-        }
-        this._connectWS(this.sessionId);
-        this.loadSessions();
-      }
+      await this._ensureSession();
 
       // Include attached image if present (capture BEFORE adding bubble)
       const imgData = this._pendingImage;
@@ -128,7 +127,7 @@ class ChatApp {
               prompt: text,
               session_id: this.sessionId,
               image: imgData || undefined,
-              attachments: attachments.length ? attachments : undefined,
+              attachment_tokens: attachments.length ? attachments.map(a => a.token) : undefined,
             })
           });
           const data = await r.json();
@@ -152,7 +151,7 @@ class ChatApp {
         this._showActivity('', 'Processing', 'sending to agent...');
         const payload = {type: 'prompt', prompt: text};
         if (imgData) payload.image = imgData;
-        if (attachments.length) payload.attachments = attachments;
+        if (attachments.length) payload.attachment_tokens = attachments.map(a => a.token);
         this.ws.send(JSON.stringify(payload));
       } else {
         this._showActivity('', 'Processing', 'sending (http)...');
@@ -163,7 +162,7 @@ class ChatApp {
             prompt: text,
             session_id: this.sessionId,
             image: imgData || undefined,
-            attachments: attachments.length ? attachments : undefined,
+            attachment_tokens: attachments.length ? attachments.map(a => a.token) : undefined,
           })
         });
         if (!r.ok) {
@@ -283,7 +282,7 @@ class ChatApp {
       prompt: cmd,
       session_id: this.sessionId || '',
       image: imgData || undefined,
-      attachments: attachments.length ? attachments : undefined,
+      attachment_tokens: attachments.length ? attachments.map(a => a.token) : undefined,
     });
     const restoreAttachments = () => {
       this._pendingImage = imgData;
@@ -627,7 +626,7 @@ class ChatApp {
     files.forEach((file) => this._handleAttachmentFile(file));
   }
 
-  _handleAttachmentFile(file) {
+  async _handleAttachmentFile(file) {
     if (!file) return;
     const parts = (file.name || '').split('.');
     const ext = parts.length > 1 ? String(parts.pop() || '').toLowerCase() : '';
@@ -640,22 +639,65 @@ class ChatApp {
       this._addError(`${file.name} is too large — max 25 MB`);
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target.result;
-      if (file.type.startsWith('image/')) {
-        this._pendingImage = dataUrl;
-      } else {
-        this._pendingFiles.push({
-          name: file.name,
-          type: file.type || this._guessAttachmentMime(file.name),
-          data: dataUrl,
-          size: file.size,
-        });
-      }
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        this._pendingImage = e.target.result;
+        this._renderAttachmentPreview();
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+
+    const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    this._pendingFiles.push({
+      localId,
+      name: file.name,
+      size: file.size,
+      status: 'uploading',
+    });
+    this._renderAttachmentPreview();
+    try {
+      await this._ensureSession();
+      const uploaded = await this._uploadAttachment(file);
+      this._pendingFiles = this._pendingFiles.map((item) =>
+        item.localId === localId ? {...uploaded, status: 'ready'} : item
+      );
       this._renderAttachmentPreview();
-    };
-    reader.readAsDataURL(file);
+    } catch(e) {
+      this._pendingFiles = this._pendingFiles.filter((item) => item.localId !== localId);
+      this._renderAttachmentPreview();
+      this._addError(`Upload failed for ${file.name}: ${e.message}`);
+    }
+  }
+
+  _csrfTokenFromCookie() {
+    const match = document.cookie.match(/(?:^|; )ccsrf=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  _uploadAttachment(file) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/uploads', true);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('X-Session-Id', this.sessionId || '');
+      xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name || 'attachment'));
+      xhr.setRequestHeader('X-File-Type', file.type || this._guessAttachmentMime(file.name));
+      const csrf = this._csrfTokenFromCookie();
+      if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText || '{}'); } catch(e) {}
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(data.attachment || {});
+        } else {
+          reject(new Error(data.error || `Server error (${xhr.status})`));
+        }
+      };
+      xhr.onerror = () => reject(new Error('network error'));
+      xhr.send(file);
+    });
   }
 
   _guessAttachmentMime(name) {
@@ -712,7 +754,8 @@ class ChatApp {
       const chip = document.createElement('div');
       chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border);border-radius:999px;background:var(--panel);font-size:12px;color:var(--text);';
       const label = document.createElement('span');
-      label.textContent = file.name || `file-${idx + 1}`;
+      const suffix = file.status === 'uploading' ? ' (uploading...)' : '';
+      label.textContent = `${file.name || `file-${idx + 1}`}${suffix}`;
       const removeBtn = document.createElement('button');
       removeBtn.innerHTML = '&times;';
       removeBtn.style.cssText = 'border:none;background:transparent;color:var(--text-dim);cursor:pointer;font-size:14px;line-height:1;';

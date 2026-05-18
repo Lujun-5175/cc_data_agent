@@ -283,6 +283,8 @@ class ChatSession:
         self.messages: list[dict] = (_db.repo.get_messages(self.session_id)
                                      if existing else [])
         self._msg_lock = threading.Lock()
+        self._staged_uploads: dict[str, dict] = {}
+        self._upload_lock = threading.Lock()
 
         # Persist (create-or-update) metadata
         _db.repo.upsert_session(
@@ -304,13 +306,15 @@ class ChatSession:
         ctx.agent_state = self._agent_state
         ctx.run_query = lambda msg: self.submit_prompt(msg)
 
-    def _store_attachment(self, attachment: dict) -> dict:
-        mime_type, raw = _decode_attachment_payload(attachment.get("data", ""))
+    def _store_attachment(self, attachment: dict, raw: bytes | None = None) -> dict:
+        mime_type = attachment.get("type") or ""
+        if raw is None:
+            mime_type, raw = _decode_attachment_payload(attachment.get("data", ""))
         if len(raw) > _ATTACHMENT_MAX_BYTES:
             raise ValueError("Attachment too large — max 25 MB per file")
         name = _sanitize_attachment_name(
             attachment.get("name", ""),
-            attachment.get("type") or mime_type,
+            mime_type,
         )
         ext = Path(name).suffix.lower()
         kind = (
@@ -324,11 +328,32 @@ class ChatSession:
         file_path.write_bytes(raw)
         return {
             "name": name,
-            "mime": attachment.get("type") or mime_type,
+            "mime": mime_type,
             "path": str(file_path.resolve()),
             "size": len(raw),
             "kind": kind,
         }
+
+    def stage_attachment_upload(self, name: str, mime_type: str, raw: bytes) -> dict:
+        stored = self._store_attachment({"name": name, "type": mime_type}, raw=raw)
+        token = uuid.uuid4().hex
+        with self._upload_lock:
+            self._staged_uploads[token] = stored
+        return {
+            "token": token,
+            "name": stored["name"],
+            "kind": stored["kind"],
+            "size": stored["size"],
+        }
+
+    def _consume_staged_uploads(self, tokens: list[str]) -> list[dict]:
+        consumed: list[dict] = []
+        with self._upload_lock:
+            for token in tokens or []:
+                item = self._staged_uploads.pop(token, None)
+                if item:
+                    consumed.append(item)
+        return consumed
 
     # ── Subscriber management ──────────────────────────────────────────
 
@@ -464,6 +489,7 @@ class ChatSession:
         prompt: str,
         image: str | None = None,
         attachments: list[dict] | None = None,
+        attachment_tokens: list[str] | None = None,
     ) -> bool:
         """Submit a prompt or slash command. Returns False if agent is busy."""
         if not self._try_begin_turn():
@@ -480,6 +506,8 @@ class ChatSession:
                 ctx.pending_image = None
             if attachments:
                 ctx.pending_files = [self._store_attachment(att) for att in attachments]
+            elif attachment_tokens:
+                ctx.pending_files = self._consume_staged_uploads(attachment_tokens)
             else:
                 ctx.pending_files = []
         except Exception:

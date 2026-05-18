@@ -968,7 +968,8 @@ def _handle_chat_websocket(sock: socket.socket, extra: bytes,
                             chat_session.submit_prompt(
                                 obj.get("prompt", ""),
                                 image=obj.get("image"),
-                                attachments=obj.get("attachments"))
+                                attachments=obj.get("attachments"),
+                                attachment_tokens=obj.get("attachment_tokens"))
                     except (json.JSONDecodeError, KeyError):
                         pass
         except (OSError, ConnectionResetError):
@@ -1082,9 +1083,10 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
             sock.close()
             return
 
-        # Parse JSON body for POST requests
+        # Parse request body for POST requests
         body_str = ""
         body_json = {}
+        body_bytes = b""
         if method in ("POST", "PATCH"):
             content_len = int(headers.get("content-length", 0))
             if content_len > 0:
@@ -1106,12 +1108,12 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
             cors_hdrs = ""
             if cors_origin:
                 cors_hdrs = (
-                    f"Access-Control-Allow-Origin: {cors_origin}\r\n"
-                    f"Access-Control-Allow-Credentials: true\r\n"
-                    f"Access-Control-Allow-Methods: GET, POST, PATCH, OPTIONS\r\n"
-                    f"Access-Control-Allow-Headers: Content-Type\r\n"
-                    f"Vary: Origin\r\n"
-                )
+                        f"Access-Control-Allow-Origin: {cors_origin}\r\n"
+                        f"Access-Control-Allow-Credentials: true\r\n"
+                        f"Access-Control-Allow-Methods: GET, POST, PATCH, OPTIONS\r\n"
+                        f"Access-Control-Allow-Headers: Content-Type, X-CSRF-Token, X-Session-Id, X-File-Name, X-File-Type\r\n"
+                        f"Vary: Origin\r\n"
+                    )
             _send_http(sock, "204 No Content", "text/plain", b"",
                        cors_hdrs)
             sock.close()
@@ -1394,6 +1396,50 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
             sock.close()
             return
 
+        if path == "/api/uploads" and method == "POST":
+            uid = _require_user(sock, cookie, origin)
+            if uid is None:
+                return
+            from urllib.parse import unquote
+            from web.api import get_chat_session
+            from cc_config import load_config
+
+            sid = headers.get("x-session-id", "").strip()
+            if not sid:
+                _send_http(sock, "400 Bad Request", "application/json",
+                           b'{"error":"missing session id"}',
+                           request_origin=origin)
+                sock.close()
+                return
+            if not body_bytes:
+                _send_http(sock, "400 Bad Request", "application/json",
+                           b'{"error":"empty upload"}',
+                           request_origin=origin)
+                sock.close()
+                return
+            chat_sess = get_chat_session(sid, uid, load_config())
+            if not chat_sess:
+                _send_http(sock, "404 Not Found", "application/json",
+                           b'{"error":"session not found"}',
+                           request_origin=origin)
+                sock.close()
+                return
+            try:
+                attachment = chat_sess.stage_attachment_upload(
+                    unquote(headers.get("x-file-name", "attachment")),
+                    headers.get("x-file-type", "application/octet-stream"),
+                    body_bytes,
+                )
+            except ValueError as exc:
+                _send_http(sock, "400 Bad Request", "application/json",
+                           json.dumps({"error": str(exc)}).encode(),
+                           request_origin=origin)
+                sock.close()
+                return
+            _send_json(sock, {"attachment": attachment}, request_origin=origin)
+            sock.close()
+            return
+
         # ── SSE: Stream output ───────────────────────────────────────
         if path == "/api/stream" and method == "GET":
             sid = ""
@@ -1537,6 +1583,7 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
             prompt = body_json.get("prompt", "")
             img_data = body_json.get("image")  # base64 data URL from frontend
             attachments = body_json.get("attachments")
+            attachment_tokens = body_json.get("attachment_tokens")
             if prompt and prompt.startswith("/"):
                 # Check if client wants SSE streaming
                 accept_hdr = headers.get("accept", "")
@@ -1599,6 +1646,7 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
                     prompt,
                     image=img_data,
                     attachments=attachments,
+                    attachment_tokens=attachment_tokens,
                 )
             if not accepted:
                 _send_http(sock, "409 Conflict", "application/json",

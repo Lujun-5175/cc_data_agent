@@ -178,3 +178,29 @@ def test_append_pending_file_hints_mentions_matching_tools():
     assert "ReadPDF" in content
     assert "ReadSpreadsheet" in content
     assert "Use `Read` to inspect it." in content
+
+
+def test_stage_attachment_upload_returns_token_and_consumes_once(tmp_path, monkeypatch):
+    from web.api import ChatSession
+    from web import api as _apimod
+    from web import db as _dbmod
+
+    db_path = tmp_path / "web-test.db"
+    monkeypatch.setenv("CHEETAHCLAWS_WEB_DB", str(db_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_apimod, "_ATTACHMENT_UPLOAD_ROOT", tmp_path / ".cheetahclaws" / "uploads")
+    _dbmod._engine = None
+    _dbmod._SessionLocal = None
+    _dbmod.init_db(Path(db_path))
+
+    user = _dbmod.repo.create_user("alice", "hash", is_admin=True)
+    sess = ChatSession({"model": "test-model"}, user["id"])
+
+    uploaded = sess.stage_attachment_upload("sheet.csv", "text/csv", b"a,b\n1,2\n")
+    assert uploaded["token"]
+    assert uploaded["kind"] == "spreadsheet"
+
+    consumed = sess._consume_staged_uploads([uploaded["token"]])
+    assert len(consumed) == 1
+    assert Path(consumed[0]["path"]).exists()
+    assert sess._consume_staged_uploads([uploaded["token"]]) == []
