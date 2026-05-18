@@ -646,7 +646,7 @@ Object.assign(ChatApp.prototype, {
     } catch(e) { console.error('switchSession:', e); }
     this._batchScroll = false;
     // Single scroll after all messages are rendered to avoid jitter
-    this._scrollBottom();
+    this._scrollBottom(true);
     this._connectWS(sid);
     this.loadSessions();
   },

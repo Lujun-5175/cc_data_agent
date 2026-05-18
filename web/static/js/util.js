@@ -1,6 +1,22 @@
 /* Small helpers shared across ChatApp modules. */
 
 Object.assign(ChatApp.prototype, {
+  _setupAutoScrollGuard() {
+    const el = document.getElementById('messages');
+    if (!el || this._autoScrollGuardReady) return;
+    this._autoScrollGuardReady = true;
+    el.addEventListener('scroll', () => {
+      if (this._programmaticScroll) return;
+      this._autoScrollEnabled = this._isNearBottom();
+    }, {passive: true});
+  },
+
+  _isNearBottom() {
+    const el = document.getElementById('messages');
+    if (!el) return true;
+    return (el.scrollHeight - el.scrollTop - el.clientHeight) <= (this._autoScrollThreshold || 80);
+  },
+
   _escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({
       '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
@@ -23,16 +39,21 @@ Object.assign(ChatApp.prototype, {
     return new Date(epochSec * 1000).toLocaleDateString();
   },
 
-  _scrollBottom() {
+  _scrollBottom(force = false) {
     const el = document.getElementById('messages');
+    if (!el) return;
+    if (!force && !this._autoScrollEnabled) return;
     // Use instant scroll — CSS scroll-behavior:smooth causes all programmatic
     // scrollTop assignments to animate, creating visible "jumps" when multiple
     // events (thinking_chunk + status transitions) fire in quick succession.
     requestAnimationFrame(() => {
+      this._programmaticScroll = true;
       const prev = el.style.scrollBehavior;
       el.style.scrollBehavior = 'auto';
       el.scrollTop = el.scrollHeight;
       el.style.scrollBehavior = prev;
+      this._programmaticScroll = false;
+      this._autoScrollEnabled = true;
     });
   },
 

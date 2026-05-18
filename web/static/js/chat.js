@@ -32,8 +32,11 @@ class ChatApp {
     this._turnActive = false;    // true during a turn, false after finishTurn
     this._wsReconnected = false; // true during WS reconnect replay guard
     this._batchScroll = false;   // suppress per-item scroll while loading history
+    this._autoScrollEnabled = true;
+    this._autoScrollThreshold = 80;
     this._setupImageHandlers();
     this._setupVisibilityFlush();
+    this._setupAutoScrollGuard();
   }
 
   // ── Send prompt ─────────────────────────────────────────────────
@@ -79,6 +82,7 @@ class ChatApp {
     const input = document.getElementById('prompt-input');
     const text = input.value.trim();
     if (!text) return;
+    this._autoScrollEnabled = true;
     if (this._pendingFiles.some((f) => f.status === 'uploading')) {
       this._addError('Please wait for file uploads to finish.');
       return;
