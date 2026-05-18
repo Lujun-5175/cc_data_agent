@@ -7,7 +7,9 @@ wire RuntimeContext callbacks → run agent on background thread → push events
 from __future__ import annotations
 
 import copy
+import base64
 import json
+import mimetypes
 import os
 import queue
 import sys
@@ -185,6 +187,44 @@ _API_KEY_CONFIG_MAP = {
 
 _ASYNC_HANDLED = "__async_handled__"
 _STDIO_CAPTURE_LOCK = threading.RLock()
+_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+_ATTACHMENT_UPLOAD_ROOT = Path.cwd() / ".cheetahclaws" / "uploads"
+_SUPPORTED_ATTACHMENT_EXTS = frozenset({
+    ".pdf", ".csv", ".tsv", ".xlsx", ".xls", ".txt", ".md", ".json",
+})
+_MIME_EXTENSION_OVERRIDES = {
+    "application/pdf": ".pdf",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "application/json": ".json",
+}
+
+
+def _sanitize_attachment_name(name: str, mime_type: str) -> str:
+    raw = Path(name or "attachment").name
+    stem = "".join(ch for ch in Path(raw).stem if ch.isalnum() or ch in ("-", "_", ".")) or "attachment"
+    ext = Path(raw).suffix.lower()
+    if not ext:
+        ext = _MIME_EXTENSION_OVERRIDES.get(mime_type, mimetypes.guess_extension(mime_type or "") or "")
+    if ext == ".mdown":
+        ext = ".md"
+    if ext not in _SUPPORTED_ATTACHMENT_EXTS:
+        raise ValueError(f"Unsupported attachment type: {ext or mime_type or 'unknown'}")
+    return f"{stem[:80]}{ext}"
+
+
+def _decode_attachment_payload(payload: str) -> tuple[str, bytes]:
+    if not payload:
+        raise ValueError("Attachment payload missing")
+    if payload.startswith("data:"):
+        header, b64 = payload.split(",", 1)
+        mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+        return mime_type, base64.b64decode(b64)
+    return "application/octet-stream", base64.b64decode(payload)
 
 
 class ChatSession:
@@ -264,6 +304,32 @@ class ChatSession:
         ctx.agent_state = self._agent_state
         ctx.run_query = lambda msg: self.submit_prompt(msg)
 
+    def _store_attachment(self, attachment: dict) -> dict:
+        mime_type, raw = _decode_attachment_payload(attachment.get("data", ""))
+        if len(raw) > _ATTACHMENT_MAX_BYTES:
+            raise ValueError("Attachment too large — max 25 MB per file")
+        name = _sanitize_attachment_name(
+            attachment.get("name", ""),
+            attachment.get("type") or mime_type,
+        )
+        ext = Path(name).suffix.lower()
+        kind = (
+            "pdf" if ext == ".pdf"
+            else "spreadsheet" if ext in {".csv", ".tsv", ".xlsx", ".xls"}
+            else "text"
+        )
+        upload_dir = _ATTACHMENT_UPLOAD_ROOT / self.session_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        file_path = upload_dir / f"{uuid.uuid4().hex[:8]}_{name}"
+        file_path.write_bytes(raw)
+        return {
+            "name": name,
+            "mime": attachment.get("type") or mime_type,
+            "path": str(file_path.resolve()),
+            "size": len(raw),
+            "kind": kind,
+        }
+
     # ── Subscriber management ──────────────────────────────────────────
 
     def subscribe(self) -> queue.Queue:
@@ -298,6 +364,8 @@ class ChatSession:
         try:
             self._agent_thread.start()
         except Exception:
+            ctx.pending_image = None
+            ctx.pending_files = []
             self._end_turn()
             raise
 
@@ -391,11 +459,32 @@ class ChatSession:
             if handled != _ASYNC_HANDLED:
                 self._end_turn()
 
-    def submit_prompt(self, prompt: str, image: str | None = None) -> bool:
+    def submit_prompt(
+        self,
+        prompt: str,
+        image: str | None = None,
+        attachments: list[dict] | None = None,
+    ) -> bool:
         """Submit a prompt or slash command. Returns False if agent is busy."""
         if not self._try_begin_turn():
             self._broadcast(ChatEvent("error", {"message": "Agent is busy"}))
             return False
+
+        import runtime
+        ctx = runtime.get_session_ctx(self.session_id)
+        try:
+            if image:
+                import re as _re
+                ctx.pending_image = _re.sub(r'^data:image/[^;]+;base64,', '', image)
+            else:
+                ctx.pending_image = None
+            if attachments:
+                ctx.pending_files = [self._store_attachment(att) for att in attachments]
+            else:
+                ctx.pending_files = []
+        except Exception:
+            self._end_turn()
+            raise
 
         # Handle slash commands locally (don't send to LLM)
         if prompt.startswith("/"):
@@ -405,20 +494,12 @@ class ChatSession:
                 return True
             finally:
                 if handled != _ASYNC_HANDLED:
+                    ctx.pending_image = None
+                    ctx.pending_files = []
                     self._end_turn()
 
         try:
             self.last_active = time.monotonic()
-            # Set pending image on runtime context so agent.py picks it up.
-            # The frontend sends a data URL (data:image/png;base64,...) but
-            # providers.py expects raw base64 and prepends its own prefix —
-            # strip the data URL wrapper to avoid double encoding.
-            if image:
-                import runtime
-                import re as _re
-                raw = _re.sub(r'^data:image/[^;]+;base64,', '', image)
-                ctx = runtime.get_session_ctx(self.session_id)
-                ctx.pending_image = raw
             # Clear event buffer for fresh turn — don't replay stale events
             with self._sub_lock:
                 self._event_buffer.clear()

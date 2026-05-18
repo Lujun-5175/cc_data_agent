@@ -82,13 +82,16 @@ def run(
     # Attach pending image from /image command if present
     sctx = runtime.get_ctx(config)
     pending_img = sctx.pending_image
+    pending_files = list(sctx.pending_files or [])
     sctx.pending_image = None
+    sctx.pending_files = []
     if pending_img:
         if _supports_vision(config):
             user_msg["images"] = [pending_img]
         else:
             # Model doesn't support vision — save image to temp file.
             _save_image_for_ocr(pending_img, config, user_msg)
+    _append_pending_file_hints(user_msg, pending_files)
     state.messages.append(user_msg)
 
     # Inject runtime metadata into config so tools (e.g. Agent) can access it
@@ -776,6 +779,26 @@ def _save_image_for_ocr(b64_data: str, config: dict, user_msg: dict) -> None:
         f"see images directly. OCR tools are not available in this build.]"
     )
     user_msg["content"] = (user_msg.get("content") or "") + ocr_hint
+
+
+def _append_pending_file_hints(user_msg: dict, pending_files: list[dict]) -> None:
+    """Tell the model where uploaded files were stored and which tools fit."""
+    if not pending_files:
+        return
+
+    lines = ["", "", "[Attached files available in the workspace:]"]
+    for item in pending_files:
+        path = item.get("path", "")
+        name = item.get("name", path)
+        kind = item.get("kind", "text")
+        if kind == "pdf":
+            tool_hint = "Use `ReadPDF` to extract text."
+        elif kind == "spreadsheet":
+            tool_hint = "Use `ReadSpreadsheet` (or `Read`) to inspect rows and sheets."
+        else:
+            tool_hint = "Use `Read` to inspect it."
+        lines.append(f"- `{name}` at `{path}`. {tool_hint}")
+    user_msg["content"] = (user_msg.get("content") or "") + "\n".join(lines)
 
 
 def _looks_like_investigation(text: str) -> bool:

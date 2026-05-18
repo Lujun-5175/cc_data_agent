@@ -26,7 +26,9 @@ class ChatApp {
     this._sessions = [];        // last fetched list (for search filter)
     this._user = null;
     this._pendingImage = null;   // base64 data URL of attached image
+    this._pendingFiles = [];     // non-image attachments sent with the next prompt
     this._yolo = false;          // YOLO mode — auto-approve all tool calls
+    this._permissionMode = 'accept-all';
     this._turnActive = false;    // true during a turn, false after finishTurn
     this._wsReconnected = false; // true during WS reconnect replay guard
     this._batchScroll = false;   // suppress per-item scroll while loading history
@@ -47,6 +49,7 @@ class ChatApp {
     this._toolSummary = null;
     this._toolSummaryEl = null;
 
+    let restoreAttachments = () => {};
     try {
       if (!this.sessionId) {
         const r = await this._fetchAuth('/api/prompt', {
@@ -61,6 +64,21 @@ class ChatApp {
           return;
         }
         this.sessionId = data.session_id;
+        // Sync the freshly created server session to the current UI
+        // preference. Otherwise a user who toggles YOLO before the first
+        // prompt can end up with the backend still on its default mode.
+        try {
+          await this._fetchAuth('/api/config', {
+            method: 'PATCH',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+              session_id: this.sessionId,
+              config: {
+                permission_mode: this._permissionMode || (this._yolo ? 'accept-all' : 'auto'),
+              },
+            }),
+          });
+        } catch(e) { /* non-fatal */ }
         // If user is "in" a folder, drop the auto-created session there.
         const fid = this._getActiveFolderId && this._getActiveFolderId();
         if (fid) {
@@ -79,10 +97,17 @@ class ChatApp {
 
       // Include attached image if present (capture BEFORE adding bubble)
       const imgData = this._pendingImage;
+      const attachments = this._pendingFiles.slice();
       this._pendingImage = null;
-      this._clearImagePreview();
+      this._pendingFiles = [];
+      this._renderAttachmentPreview();
+      restoreAttachments = () => {
+        this._pendingImage = imgData;
+        this._pendingFiles = attachments.slice();
+        this._renderAttachmentPreview();
+      };
 
-      this._addUserBubble(text, imgData);
+      this._addUserBubble(text, imgData, attachments);
       this._turnActive = true;
       this._showActivity('', 'Processing', 'connecting...');
       this._scrollBottom();
@@ -93,16 +118,22 @@ class ChatApp {
         const isLong = longRunning.some(c => text === c || text.startsWith(c + ' '));
         if (isLong) {
           this._showActivity('', 'Running', text.split(' ')[0] + '...');
-          this._runSlashSSE(text, imgData);
+          this._runSlashSSE(text, imgData, attachments);
         } else {
           this._showActivity('', 'Running', text.split(' ')[0] + '...');
           const r = await this._fetchAuth('/api/prompt', {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({prompt: text, session_id: this.sessionId, image: imgData || undefined})
+            body: JSON.stringify({
+              prompt: text,
+              session_id: this.sessionId,
+              image: imgData || undefined,
+              attachments: attachments.length ? attachments : undefined,
+            })
           });
           const data = await r.json();
           if (!r.ok) {
+            restoreAttachments();
             this._removeActivity();
             this._addError(data.error || `Server error (${r.status})`);
             return;
@@ -121,15 +152,22 @@ class ChatApp {
         this._showActivity('', 'Processing', 'sending to agent...');
         const payload = {type: 'prompt', prompt: text};
         if (imgData) payload.image = imgData;
+        if (attachments.length) payload.attachments = attachments;
         this.ws.send(JSON.stringify(payload));
       } else {
         this._showActivity('', 'Processing', 'sending (http)...');
         const r = await this._fetchAuth('/api/prompt', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({prompt: text, session_id: this.sessionId, image: imgData || undefined})
+          body: JSON.stringify({
+            prompt: text,
+            session_id: this.sessionId,
+            image: imgData || undefined,
+            attachments: attachments.length ? attachments : undefined,
+          })
         });
         if (!r.ok) {
+          restoreAttachments();
           const data = await r.json();
           this._addError(data.error || `Server error (${r.status})`);
           return;
@@ -137,6 +175,7 @@ class ChatApp {
         this._pollForResult();
       }
     } catch(e) {
+      restoreAttachments();
       input.value = text;
       this._addError('Failed to send: ' + e.message);
     }
@@ -239,8 +278,18 @@ class ChatApp {
     if (this.ws) { try { this.ws.close(); } catch(e){} this.ws = null; }
   }
 
-  _runSlashSSE(cmd, imgData) {
-    const body = JSON.stringify({prompt: cmd, session_id: this.sessionId || '', image: imgData || undefined});
+  _runSlashSSE(cmd, imgData, attachments = []) {
+    const body = JSON.stringify({
+      prompt: cmd,
+      session_id: this.sessionId || '',
+      image: imgData || undefined,
+      attachments: attachments.length ? attachments : undefined,
+    });
+    const restoreAttachments = () => {
+      this._pendingImage = imgData;
+      this._pendingFiles = attachments.slice();
+      this._renderAttachmentPreview();
+    };
     let watchdogTimer = null;
     const startWatchdog = () => {
       clearTimeout(watchdogTimer);
@@ -259,6 +308,7 @@ class ChatApp {
       body,
     }).then(response => {
       if (!response.ok) {
+        restoreAttachments();
         this._removeActivity();
         stopWatchdog();
         this._addError(`Server error (${response.status})`);
@@ -304,6 +354,7 @@ class ChatApp {
       };
       reader.read().then(processChunk);
     }).catch(err => {
+      restoreAttachments();
       stopWatchdog();
       this._removeActivity();
       this._addError('Connection error: ' + err.message);
@@ -415,12 +466,19 @@ class ChatApp {
     this._thinkScrollPending = false; this._batchScroll = false;
   }
 
-  _addUserBubble(text, imgDataUrl) {
+  _addUserBubble(text, imgDataUrl, attachments = []) {
     const el = document.createElement('div');
     el.className = 'msg user';
     let inner = '<div class="role-tag">You</div><div class="bubble">';
     if (imgDataUrl) {
       inner += `<img src="${imgDataUrl}" alt="Uploaded image" style="max-width:100%;max-height:240px;object-fit:contain;border-radius:var(--radius-sm);margin-bottom:6px;display:block">`;
+    }
+    if (attachments.length) {
+      inner += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px">';
+      attachments.forEach((file) => {
+        inner += `<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--border);border-radius:999px;background:var(--panel);font-size:12px;color:var(--text-dim)">&#128196; ${this._escapeHtml(file.name || 'file')}</span>`;
+      });
+      inner += '</div>';
     }
     inner += `<span></span></div>`;
     el.innerHTML = inner;
@@ -520,8 +578,8 @@ class ChatApp {
     const fileInput = document.getElementById('img-file-input');
     if (fileInput) {
       fileInput.addEventListener('change', () => {
-        if (fileInput.files && fileInput.files[0]) {
-          this._handleImageFile(fileInput.files[0]);
+        if (fileInput.files && fileInput.files.length) {
+          this._handleAttachmentFiles(Array.from(fileInput.files));
         }
         fileInput.value = '';
       });
@@ -537,7 +595,7 @@ class ChatApp {
           if (item.type.startsWith('image/')) {
             e.preventDefault();
             const blob = item.getAsFile();
-            if (blob) this._handleImageFile(blob);
+            if (blob) this._handleAttachmentFiles([blob]);
             return;
           }
         }
@@ -559,63 +617,120 @@ class ChatApp {
         inputArea.style.borderColor = '';
         const files = e.dataTransfer && e.dataTransfer.files;
         if (files && files.length > 0) {
-          const imgFile = Array.from(files).find(f => f.type.startsWith('image/'));
-          if (imgFile) this._handleImageFile(imgFile);
+          this._handleAttachmentFiles(Array.from(files));
         }
       });
     }
   }
 
-  _handleImageFile(file) {
-    if (!file || !file.type.startsWith('image/')) return;
-    // Enforce a reasonable size limit (20 MB)
-    if (file.size > 20 * 1024 * 1024) {
-      this._addError('Image too large — max 20 MB');
+  _handleAttachmentFiles(files) {
+    files.forEach((file) => this._handleAttachmentFile(file));
+  }
+
+  _handleAttachmentFile(file) {
+    if (!file) return;
+    const parts = (file.name || '').split('.');
+    const ext = parts.length > 1 ? String(parts.pop() || '').toLowerCase() : '';
+    const supported = file.type.startsWith('image/') || ['pdf', 'csv', 'tsv', 'xlsx', 'xls', 'txt', 'md', 'json'].includes(ext);
+    if (!supported) {
+      this._addError(`Unsupported attachment: ${file.name}`);
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      this._addError(`${file.name} is too large — max 25 MB`);
       return;
     }
     const reader = new FileReader();
     reader.onload = (e) => {
-      this._pendingImage = e.target.result;
-      this._showImagePreview(this._pendingImage, file.name);
+      const dataUrl = e.target.result;
+      if (file.type.startsWith('image/')) {
+        this._pendingImage = dataUrl;
+      } else {
+        this._pendingFiles.push({
+          name: file.name,
+          type: file.type || this._guessAttachmentMime(file.name),
+          data: dataUrl,
+          size: file.size,
+        });
+      }
+      this._renderAttachmentPreview();
     };
     reader.readAsDataURL(file);
   }
 
-  _showImagePreview(dataUrl, fileName) {
+  _guessAttachmentMime(name) {
+    const parts = (name || '').split('.');
+    const ext = parts.length > 1 ? String(parts.pop() || '').toLowerCase() : '';
+    const mimeMap = {
+      pdf: 'application/pdf',
+      csv: 'text/csv',
+      tsv: 'text/tab-separated-values',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      xls: 'application/vnd.ms-excel',
+      txt: 'text/plain',
+      md: 'text/markdown',
+      json: 'application/json',
+    };
+    return mimeMap[ext] || 'application/octet-stream';
+  }
+
+  _renderAttachmentPreview() {
     const bar = document.getElementById('img-preview-bar');
     if (!bar) return;
     bar.innerHTML = '';
-    bar.classList.add('has-img');
-    const thumb = document.createElement('div');
-    thumb.className = 'thumb';
-    const img = document.createElement('img');
-    img.src = dataUrl;
-    img.alt = 'Preview';
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'remove-img';
-    removeBtn.innerHTML = '&times;';
-    removeBtn.onclick = () => this._clearImagePreview();
-    thumb.appendChild(img);
-    thumb.appendChild(removeBtn);
-    bar.appendChild(thumb);
-    const label = document.createElement('span');
-    label.className = 'img-label';
-    label.textContent = fileName || 'image';
-    bar.appendChild(label);
-    // Highlight the image button
     const btn = document.getElementById('img-btn');
+    const hasAttachments = !!this._pendingImage || this._pendingFiles.length > 0;
+    if (!hasAttachments) {
+      bar.classList.remove('has-img');
+      if (btn) btn.classList.remove('has-img');
+      return;
+    }
+
+    bar.classList.add('has-img');
     if (btn) btn.classList.add('has-img');
+
+    if (this._pendingImage) {
+      const thumb = document.createElement('div');
+      thumb.className = 'thumb';
+      const img = document.createElement('img');
+      img.src = this._pendingImage;
+      img.alt = 'Preview';
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'remove-img';
+      removeBtn.innerHTML = '&times;';
+      removeBtn.onclick = () => this._clearPendingImage();
+      thumb.appendChild(img);
+      thumb.appendChild(removeBtn);
+      bar.appendChild(thumb);
+      const label = document.createElement('span');
+      label.className = 'img-label';
+      label.textContent = 'image';
+      bar.appendChild(label);
+    }
+
+    this._pendingFiles.forEach((file, idx) => {
+      const chip = document.createElement('div');
+      chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border);border-radius:999px;background:var(--panel);font-size:12px;color:var(--text);';
+      const label = document.createElement('span');
+      label.textContent = file.name || `file-${idx + 1}`;
+      const removeBtn = document.createElement('button');
+      removeBtn.innerHTML = '&times;';
+      removeBtn.style.cssText = 'border:none;background:transparent;color:var(--text-dim);cursor:pointer;font-size:14px;line-height:1;';
+      removeBtn.onclick = () => this._removePendingFile(idx);
+      chip.appendChild(label);
+      chip.appendChild(removeBtn);
+      bar.appendChild(chip);
+    });
   }
 
-  _clearImagePreview() {
+  _clearPendingImage() {
     this._pendingImage = null;
-    const bar = document.getElementById('img-preview-bar');
-    if (bar) {
-      bar.innerHTML = '';
-      bar.classList.remove('has-img');
-    }
-    const btn = document.getElementById('img-btn');
-    if (btn) btn.classList.remove('has-img');
+    this._renderAttachmentPreview();
+  }
+
+  _removePendingFile(idx) {
+    this._pendingFiles.splice(idx, 1);
+    this._renderAttachmentPreview();
   }
 
   _closeToolSummary() {
@@ -683,12 +798,19 @@ class ChatApp {
   setYolo(on) {
     this._yolo = on;
     const btn = document.getElementById('yolo-btn');
-    if (btn) btn.classList.toggle('on', on);
+    if (btn) {
+      btn.classList.toggle('on', on);
+      btn.textContent = on ? 'YOLO ✓' : 'YOLO';
+    }
+    const sel = document.getElementById('sp-permission');
+    if (sel) sel.value = this._permissionMode || (on ? 'accept-all' : 'auto');
   }
 
   async toggleYolo() {
-    const newMode = this._yolo ? 'auto' : 'accept-all';
-    this.setYolo(!this._yolo);
+    const next = !this._yolo;
+    const newMode = next ? 'accept-all' : 'auto';
+    this._permissionMode = newMode;
+    this.setYolo(next);
     // Persist to server
     if (this.sessionId) {
       try {

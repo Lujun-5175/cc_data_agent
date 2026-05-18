@@ -711,8 +711,8 @@ body.resizing { cursor:col-resize; user-select:none; }
     <div id="img-preview-bar"></div>
     <div id="input-row">
       <textarea id="prompt-input" rows="1" placeholder="Type a message... (Shift+Enter for newline)"></textarea>
-      <button id="img-btn" onclick="document.getElementById('img-file-input').click()" title="Attach image">&#128247;</button>
-      <input type="file" id="img-file-input" accept="image/*" style="display:none">
+      <button id="img-btn" onclick="document.getElementById('img-file-input').click()" title="Attach image, PDF, CSV, XLSX, TXT or JSON">&#128206;</button>
+      <input type="file" id="img-file-input" accept="image/*,.pdf,.csv,.tsv,.xlsx,.xls,.txt,.md,.json" multiple style="display:none">
       <button id="yolo-btn" onclick="app.toggleYolo()" title="Toggle YOLO mode — auto-approve all tool calls">YOLO</button>
       <button id="send-btn" onclick="app.send()">Send</button>
     </div>

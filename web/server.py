@@ -967,7 +967,8 @@ def _handle_chat_websocket(sock: socket.socket, extra: bytes,
                         elif msg_type == "prompt":
                             chat_session.submit_prompt(
                                 obj.get("prompt", ""),
-                                image=obj.get("image"))
+                                image=obj.get("image"),
+                                attachments=obj.get("attachments"))
                     except (json.JSONDecodeError, KeyError):
                         pass
         except (OSError, ConnectionResetError):
@@ -1535,6 +1536,7 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
                 chat_sess = create_chat_session(load_config(), uid)
             prompt = body_json.get("prompt", "")
             img_data = body_json.get("image")  # base64 data URL from frontend
+            attachments = body_json.get("attachments")
             if prompt and prompt.startswith("/"):
                 # Check if client wants SSE streaming
                 accept_hdr = headers.get("accept", "")
@@ -1593,7 +1595,11 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
                 return
             accepted = True
             if prompt:
-                accepted = chat_sess.submit_prompt(prompt, image=img_data)
+                accepted = chat_sess.submit_prompt(
+                    prompt,
+                    image=img_data,
+                    attachments=attachments,
+                )
             if not accepted:
                 _send_http(sock, "409 Conflict", "application/json",
                            json.dumps({"error": "agent is busy",

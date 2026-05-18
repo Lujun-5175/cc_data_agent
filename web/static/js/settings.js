@@ -98,10 +98,11 @@ Object.assign(ChatApp.prototype, {
   },
 
   _renderConfig(cfg) {
+    this._permissionMode = cfg.permission_mode || 'auto';
     document.getElementById('sp-current-model').textContent = cfg.model || '(not set)';
-    document.getElementById('sp-permission').value = cfg.permission_mode || 'auto';
+    document.getElementById('sp-permission').value = this._permissionMode;
     // Sync YOLO button with server permission mode
-    if (this.setYolo) this.setYolo(cfg.permission_mode === 'accept-all');
+    if (this.setYolo) this.setYolo(this._permissionMode === 'accept-all');
     document.getElementById('sp-thinking').className =
       'sp-toggle' + (cfg.thinking ? ' on' : '');
     document.getElementById('sp-verbose').className =
@@ -168,6 +169,7 @@ Object.assign(ChatApp.prototype, {
   },
 
   async updateConfig(key, value) {
+    if (key === 'permission_mode') this._permissionMode = value;
     if (!this.sessionId) return;
     try {
       await this._fetchAuth('/api/config', {
@@ -202,6 +204,7 @@ Object.assign(ChatApp.prototype, {
   toggleYolo() {
     const current = this._yolo;
     const newMode = current ? 'auto' : 'accept-all';
+    this._permissionMode = newMode;
     this._yolo = !current;
     this.updateConfig('permission_mode', newMode);
     this._updateYoloBtn();
@@ -219,6 +222,6 @@ Object.assign(ChatApp.prototype, {
       btn.textContent = this._yolo ? 'YOLO ✓' : 'YOLO';
     }
     const sel = document.getElementById('sp-permission');
-    if (sel) sel.value = this._yolo ? 'accept-all' : 'auto';
+    if (sel) sel.value = this._permissionMode || (this._yolo ? 'accept-all' : 'auto');
   },
 });

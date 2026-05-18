@@ -15,6 +15,8 @@ _register_builtins() which wires all built-ins into the tool registry.
 """
 from __future__ import annotations
 
+import importlib
+import sys
 from typing import Callable, Optional
 
 # ── Re-exports (backward compat) ──────────────────────────────────────────
@@ -669,9 +671,17 @@ _EXTENSION_MODULES = [
     "task.tools",
 ]
 
+def _load_extension_module(mod_name: str) -> None:
+    """Import or reload a self-registering extension tool module."""
+    if mod_name in sys.modules:
+        importlib.reload(sys.modules[mod_name])
+    else:
+        importlib.import_module(mod_name)
+
+
 for _mod_name in _EXTENSION_MODULES:
     try:
-        __import__(_mod_name)
+        _load_extension_module(_mod_name)
     except Exception:
         pass  # Extension loading is best-effort; never crash startup
 
@@ -690,10 +700,9 @@ except Exception:
     pass
 
 # Sub-modules within tools/ package (self-registering on import)
-import importlib as _il
 for _sub in ("browser", "email", "files"):
     try:
-        _il.import_module(f"tools.{_sub}")
+        _load_extension_module(f"tools.{_sub}")
     except Exception:
         pass
 
