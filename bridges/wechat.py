@@ -40,6 +40,7 @@ _ILINK_BASE_URL         = "https://ilinkai.weixin.qq.com"
 _ILINK_APP_ID           = "bot"
 _ILINK_CLIENT_VERSION   = (2 << 16) | (2 << 8) | 0
 _ILINK_CHANNEL_VERSION  = "2.2.0"
+_ILINK_BOT_AGENT        = "CheetahClaws"
 _ILINK_DEFAULT_BOT_TYPE = "3"
 
 _WX_EP_GET_UPDATES   = "ilink/bot/getupdates"
@@ -47,6 +48,8 @@ _WX_EP_SEND_MESSAGE  = "ilink/bot/sendmessage"
 _WX_EP_SEND_TYPING   = "ilink/bot/sendtyping"
 _WX_EP_GET_BOT_QR    = "ilink/bot/get_bot_qrcode"
 _WX_EP_GET_QR_STATUS = "ilink/bot/get_qrcode_status"
+_WX_EP_NOTIFY_START  = "ilink/bot/msg/notifystart"
+_WX_EP_NOTIFY_STOP   = "ilink/bot/msg/notifystop"
 
 _WX_LONG_POLL_TIMEOUT = 37
 _WX_API_TIMEOUT       = 15
@@ -171,6 +174,13 @@ def _wx_auth_headers(token: str, body: str) -> dict:
         **_wx_app_headers(),
     }
 
+
+def _wx_base_info() -> dict:
+    return {
+        "channel_version": _ILINK_CHANNEL_VERSION,
+        "bot_agent": _ILINK_BOT_AGENT,
+    }
+
 def _wx_get(base_url: str, endpoint: str, timeout: int = _WX_QR_TIMEOUT) -> dict | None:
     import urllib.request
     url = f"{base_url.rstrip('/')}/{endpoint}"
@@ -184,7 +194,7 @@ def _wx_get(base_url: str, endpoint: str, timeout: int = _WX_QR_TIMEOUT) -> dict
 def _wx_post(base_url: str, endpoint: str, token: str, payload: dict,
              timeout: int = _WX_API_TIMEOUT) -> dict | None:
     import urllib.request
-    payload["base_info"] = {"channel_version": _ILINK_CHANNEL_VERSION}
+    payload["base_info"] = _wx_base_info()
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     url = f"{base_url.rstrip('/')}/{endpoint}"
     data = body.encode("utf-8")
@@ -199,7 +209,7 @@ def _wx_get_updates(base_url: str, token: str, sync_buf: str) -> dict | None:
     import urllib.request, socket as _socket
     payload = {
         "get_updates_buf": sync_buf,
-        "base_info": {"channel_version": _ILINK_CHANNEL_VERSION},
+        "base_info": _wx_base_info(),
     }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     url = f"{base_url.rstrip('/')}/{_WX_EP_GET_UPDATES}"
@@ -257,6 +267,22 @@ def _wx_typing(user_id: str, config: dict) -> None:
         "typing_ticket": ticket,
         "status": _WX_TYPING_START,
     }, timeout=5)
+
+
+def _wx_notify_start(config: dict) -> dict | None:
+    token = config.get("wechat_token", "")
+    base_url = config.get("wechat_base_url", _ILINK_BASE_URL)
+    if not token:
+        return None
+    return _wx_post(base_url, _WX_EP_NOTIFY_START, token, {}, timeout=10)
+
+
+def _wx_notify_stop(config: dict) -> dict | None:
+    token = config.get("wechat_token", "")
+    base_url = config.get("wechat_base_url", _ILINK_BASE_URL)
+    if not token:
+        return None
+    return _wx_post(base_url, _WX_EP_NOTIFY_STOP, token, {}, timeout=10)
 
 def _wx_typing_loop(user_id: str, stop_event: threading.Event, config: dict) -> None:
     while not stop_event.is_set():
@@ -958,6 +984,14 @@ def _wx_supervisor(token: str, base_url: str, config: dict) -> None:
     global _wechat_thread
     backoff = _WX_BACKOFF_INITIAL
     attempt = 0
+    try:
+        res = _wx_notify_start(config)
+        if isinstance(res, dict) and res.get("ret") not in (0, None):
+            _log.warn("wechat_notify_start_error",
+                      ret=res.get("ret"), errcode=res.get("errcode"),
+                      errmsg=str(res.get("errmsg", ""))[:200])
+    except Exception as exc:
+        _log.warn("wechat_notify_start_exception", error=str(exc)[:200])
     while not _wechat_stop.is_set():
         attempt += 1
         try:
@@ -978,6 +1012,15 @@ def _wx_supervisor(token: str, base_url: str, config: dict) -> None:
             _log.warn("bridge_auth_error_stop", bridge="wechat")
             break
         break
+
+    try:
+        res = _wx_notify_stop(config)
+        if isinstance(res, dict) and res.get("ret") not in (0, None):
+            _log.warn("wechat_notify_stop_error",
+                      ret=res.get("ret"), errcode=res.get("errcode"),
+                      errmsg=str(res.get("errmsg", ""))[:200])
+    except Exception as exc:
+        _log.warn("wechat_notify_stop_exception", error=str(exc)[:200])
 
     _wechat_thread = None
 

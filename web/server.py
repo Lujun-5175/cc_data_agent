@@ -284,6 +284,12 @@ let authToken = '';
 let sessionId = '';
 let mode = ''; // 'ws' or 'sse'
 let _dataSub = null, _resizeSub = null;
+let _evtSource = null;
+let _ws = null;
+let _reconnectTimer = null;
+let _reconnectAttempts = 0;
+let _sseFailures = 0;
+const _TRANSPORT_KEY = 'cc-web-terminal-transport';
 function bindInput(dataFn, resizeFn) {{
   if (_dataSub) _dataSub.dispose();
   if (_resizeSub) _resizeSub.dispose();
@@ -296,54 +302,117 @@ function setStatus(connected, label) {{
   document.getElementById('status-text').textContent = label || (connected ? 'connected' : 'disconnected');
 }}
 
+function _rememberTransport(kind) {{
+  try {{ localStorage.setItem(_TRANSPORT_KEY, kind); }} catch (_e) {{}}
+}}
+
+function _preferredTransport() {{
+  try {{ return localStorage.getItem(_TRANSPORT_KEY) || 'ws'; }} catch (_e) {{ return 'ws'; }}
+}}
+
+function _clearReconnect() {{
+  if (_reconnectTimer) {{
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }}
+}}
+
+function _scheduleReconnect(preferred) {{
+  _clearReconnect();
+  const delay = Math.min(1000 * Math.pow(2, _reconnectAttempts), 5000);
+  _reconnectAttempts += 1;
+  setStatus(false, 'reconnecting...');
+  _reconnectTimer = setTimeout(() => {{
+    if (preferred === 'sse' && sessionId) connectSSE(true);
+    else connect();
+  }}, delay);
+}}
+
+function _sessionRequestBody() {{
+  return JSON.stringify({{cols: term.cols, rows: term.rows}});
+}}
+
+async function _postJSON(url, bodyObj) {{
+  const r = await fetch(url, {{
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(bodyObj)
+  }});
+  let data = {{}};
+  try {{ data = await r.json(); }} catch (_e) {{}}
+  if (!r.ok) throw new Error(data.error || `HTTP ${{r.status}}`);
+  return data;
+}}
+
 // ── SSE + POST fallback (works through any HTTP proxy) ──────────────
 
-function connectSSE() {{
+function connectSSE(reuseSession = false) {{
   mode = 'sse';
+  _rememberTransport('sse');
   term.clear();
   term.reset();
   setStatus(false, 'connecting (http)...');
 
-  // Create PTY session (cookie carries auth)
+  const openStream = () => {{
+    if (_evtSource) {{
+      try {{ _evtSource.close(); }} catch (_e) {{}}
+      _evtSource = null;
+    }}
+    _evtSource = new EventSource('/api/stream?sid=' + sessionId);
+    _evtSource.onopen = () => {{
+      _sseFailures = 0;
+      _reconnectAttempts = 0;
+      _clearReconnect();
+      setStatus(true, 'connected (http)');
+    }};
+    _evtSource.onmessage = (e) => {{
+      const bytes = Uint8Array.from(atob(e.data), c => c.charCodeAt(0));
+      term.write(bytes);
+    }};
+    _evtSource.onerror = () => {{
+      setStatus(false);
+      if (_evtSource) {{
+        try {{ _evtSource.close(); }} catch (_e) {{}}
+        _evtSource = null;
+      }}
+      _sseFailures += 1;
+      if (_sseFailures >= 2) {{
+        sessionId = '';
+        _sseFailures = 0;
+        _scheduleReconnect('fresh');
+      }} else {{
+        _scheduleReconnect('sse');
+      }}
+    }};
+
+    bindInput(
+      d => _postJSON('/api/input', {{sid: sessionId, data: d}}).catch(() => {{
+        sessionId = '';
+        _scheduleReconnect('fresh');
+      }}),
+      ({{cols, rows}}) => _postJSON('/api/resize', {{sid: sessionId, cols, rows}}).catch(() => {{
+        sessionId = '';
+        _scheduleReconnect('fresh');
+      }})
+    );
+  }};
+
+  if (reuseSession && sessionId) {{
+    openStream();
+    return;
+  }}
+
   fetch('/api/session', {{
     method: 'POST',
     credentials: 'same-origin',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{cols: term.cols, rows: term.rows}})
+    body: _sessionRequestBody()
   }})
   .then(r => r.json())
   .then(data => {{
     sessionId = data.session_id;
-
-    // Open SSE stream for terminal output (cookie carries auth)
-    const evtSource = new EventSource('/api/stream?sid=' + sessionId);
-    evtSource.onopen = () => setStatus(true, 'connected (http)');
-    evtSource.onmessage = (e) => {{
-      // Data is base64-encoded binary
-      const bytes = Uint8Array.from(atob(e.data), c => c.charCodeAt(0));
-      term.write(bytes);
-    }};
-    evtSource.onerror = () => {{
-      setStatus(false);
-      evtSource.close();
-      term.write('\\r\\n\\x1b[33m[disconnected — refresh to reconnect]\\x1b[0m\\r\\n');
-    }};
-
-    // Bind input (replaces any previous WS handlers)
-    bindInput(
-      d => fetch('/api/input', {{
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{sid: sessionId, data: d}})
-      }}).catch(() => {{}}),
-      ({{cols, rows}}) => fetch('/api/resize', {{
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{sid: sessionId, cols, rows}})
-      }}).catch(() => {{}})
-    );
+    openStream();
   }})
   .catch(err => {{
     setStatus(false, 'connection failed');
@@ -355,56 +424,66 @@ function connectSSE() {{
 
 function connectWS() {{
   mode = 'ws';
+  _rememberTransport('ws');
   setStatus(false, 'connecting (ws)...');
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = proto + '//' + location.host + '/ws';
-  const ws = new WebSocket(url);
-  ws.binaryType = 'arraybuffer';
+  _ws = new WebSocket(url);
+  _ws.binaryType = 'arraybuffer';
 
   let wsOpened = false;
-  let wsAuthed = false;
   const wsTimeout = setTimeout(() => {{
-    if (!wsOpened) ws.close();
+    if (!wsOpened && _ws) _ws.close();
   }}, 3000);
 
-  ws.onopen = () => {{
+  _ws.onopen = () => {{
     wsOpened = true;
     clearTimeout(wsTimeout);
+    _clearReconnect();
+    _reconnectAttempts = 0;
+    _rememberTransport('ws');
     // First frame: authenticate (cookie may already suffice, but send
     // explicit auth in case cookie is not available — e.g. cross-origin).
-    ws.send(JSON.stringify({{type:'auth', token:authToken}}));
+    _ws.send(JSON.stringify({{type:'auth', token:authToken}}));
     setStatus(true, 'connected (ws)');
-    ws.send(JSON.stringify({{type:'resize', cols:term.cols, rows:term.rows}}));
+    _ws.send(JSON.stringify({{type:'resize', cols:term.cols, rows:term.rows}}));
 
     bindInput(
-      d => {{ if (ws.readyState === 1) ws.send(d); }},
-      ({{cols, rows}}) => {{ if (ws.readyState === 1) ws.send(JSON.stringify({{type:'resize', cols, rows}})); }}
+      d => {{ if (_ws && _ws.readyState === 1) _ws.send(d); }},
+      ({{cols, rows}}) => {{ if (_ws && _ws.readyState === 1) _ws.send(JSON.stringify({{type:'resize', cols, rows}})); }}
     );
   }};
-  ws.onmessage = (e) => {{
+  _ws.onmessage = (e) => {{
     if (e.data instanceof ArrayBuffer) term.write(new Uint8Array(e.data));
     else term.write(e.data);
   }};
-  ws.onclose = () => {{
+  _ws.onclose = () => {{
     clearTimeout(wsTimeout);
     if (!wsOpened) {{
-      connectSSE();
+      connectSSE(!!sessionId);
     }} else {{
-      setStatus(false);
-      term.write('\\r\\n\\x1b[33m[disconnected — refresh to reconnect]\\x1b[0m\\r\\n');
+      _scheduleReconnect(_preferredTransport());
     }}
   }};
-  ws.onerror = () => {{ }};
+  _ws.onerror = () => {{ }};
 }}
 
 // ── Connect (try WebSocket first, fall back to SSE) ─────────────────
 
 function connect() {{
-  connectWS();
+  // Prefer the persistent SSE/PTy path for reliability. WS terminal
+  // sessions are tied to a single socket and die on transient disconnects.
+  connectSSE(!!sessionId);
 }}
 
 window.addEventListener('resize', () => fitAddon.fit());
+document.addEventListener('visibilitychange', () => {{
+  if (!document.hidden && sessionId) {{
+    if (mode === 'sse' && !_evtSource) connectSSE(true);
+    if (mode === 'ws' && (!_ws || _ws.readyState > 1)) connect();
+  }}
+}});
 
 function doLogin(e) {{
   e.preventDefault();
@@ -620,24 +699,10 @@ def _jwt_user_id(cookie_str: str) -> Optional[int]:
         uid = 1
     else:
         try:
-            from web.auth import decode_token
+            from web.auth import auth_user_id
         except ImportError:
             return None
-        if not cookie_str:
-            return None
-        for part in cookie_str.split(";"):
-            part = part.strip()
-            if part.startswith("ccjwt="):
-                from urllib.parse import unquote
-                token = unquote(part[len("ccjwt="):])
-                payload = decode_token(token)
-                if not payload:
-                    return None
-                try:
-                    uid = int(payload.get("sub", ""))
-                except (TypeError, ValueError):
-                    return None
-                break
+        uid = auth_user_id(cookie_str)
     if uid is not None:
         _req_ctx.user_id = uid
     return uid
@@ -902,10 +967,14 @@ def _handle_sse_stream(sock: socket.socket, sid: str,
     except (OSError, BrokenPipeError, ConnectionResetError):
         pass
     finally:
-        # Clean up session when stream ends
-        session.close()
-        with _sessions_lock:
-            _sessions.pop(sid, None)
+        # Keep the PTY session alive across transient SSE disconnects so the
+        # browser can reconnect after tab switches / backgrounding. Only tear
+        # it down when the child process itself has exited.
+        session.attached = False
+        if session.proc.poll() is not None:
+            session.close()
+            with _sessions_lock:
+                _sessions.pop(sid, None)
 
 
 # ── Chat WebSocket handler (structured events) ─────────────────────────
@@ -964,6 +1033,13 @@ def _handle_chat_websocket(sock: socket.socket, extra: bytes,
                         if msg_type == "approve":
                             chat_session.approve_permission(
                                 obj.get("granted", False))
+                        elif msg_type == "input_response":
+                            import runtime
+                            ctx = runtime.get_session_ctx(chat_session.session_id)
+                            evt = ctx.web_input_event
+                            if evt:
+                                ctx.web_input_value = obj.get("value", "")
+                                evt.set()
                         elif msg_type == "prompt":
                             chat_session.submit_prompt(
                                 obj.get("prompt", ""),
@@ -1193,7 +1269,7 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
             sock.close()
             return
 
-        # POST /api/auth/register — create user (open in v1; first user → admin)
+        # POST /api/auth/register — bootstrap-only registration.
         if path == "/api/auth/register" and method == "POST":
             username = (body_json.get("username") or "").strip()
             password = body_json.get("password") or ""
@@ -1207,21 +1283,27 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
                 from web.db import init_db, repo as dbrepo
                 from web.auth import hash_password, issue_token, build_cookie
                 init_db()
-                if dbrepo.get_user_by_username(username) is not None:
+                user, status = dbrepo.create_bootstrap_user(
+                    username, hash_password(password),
+                )
+                if status == "username_taken":
                     _send_http(sock, "409 Conflict", "application/json",
                                b'{"error":"username taken"}',
                                request_origin=origin)
                     sock.close()
                     return
-                is_admin = dbrepo.user_count() == 0
-                user = dbrepo.create_user(username, hash_password(password),
-                                          is_admin=is_admin)
+                if status == "registration_closed" or user is None:
+                    _send_http(sock, "403 Forbidden", "application/json",
+                               b'{"error":"registration is closed"}',
+                               request_origin=origin)
+                    sock.close()
+                    return
                 token = issue_token(user["id"], user["username"])
                 from web.logging_setup import get_logger, incr
                 incr("auth_registrations_total")
                 get_logger("auth").info("register", extra={
                     "username": user["username"], "user_id": user["id"],
-                    "is_admin": is_admin,
+                    "is_admin": True,
                 })
                 _send_http(sock, "200 OK", "application/json",
                            json.dumps({"ok": True, "user": user}).encode(),
@@ -1280,10 +1362,9 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
 
         # POST /api/auth/logout — clear cookie
         if path == "/api/auth/logout" and method == "POST":
-            clear = ("Set-Cookie: ccjwt=; Path=/; HttpOnly; SameSite=Strict; "
-                     "Max-Age=0\r\n")
+            from web.auth import clear_cookie
             _send_http(sock, "200 OK", "application/json", b'{"ok":true}',
-                       extra_headers=clear, request_origin=origin)
+                       extra_headers=clear_cookie(), request_origin=origin)
             sock.close()
             return
 
@@ -1853,6 +1934,7 @@ def _handle_connection(sock: socket.socket, addr: tuple) -> None:
                         "title": chat_sess.title,
                         "messages": chat_sess.get_messages(),
                         "config": chat_sess.get_safe_config(),
+                        "context_usage": chat_sess.get_context_usage(),
                         "busy": not chat_sess.is_idle(),
                     }, request_origin=origin)
                     sock.close()

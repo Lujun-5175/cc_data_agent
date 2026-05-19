@@ -3,8 +3,9 @@
 
 const app = new ChatApp();
 app.initTheme();
-app._permissionMode = 'accept-all';
-app.setYolo(true);  // YOLO mode enabled — auto-approve all tool calls
+app._permissionMode = 'auto';
+app.setYolo(false);
+app._setupContextCard();
 app.bootstrap();
 app._showWelcome();
 
@@ -29,12 +30,15 @@ document.getElementById('main').addEventListener('click', () => {
   const sidebar = document.getElementById('sidebar');
   const resizer = document.getElementById('sidebar-resizer');
   if (!sidebar || !resizer) return;
-  const MIN = 200, MAX = 600;
+  const MIN = 320, MAX = 600;
   // Restore saved width
   const saved = parseInt(localStorage.getItem('cc-sidebar-w') || '0', 10);
   if (saved >= MIN && saved <= MAX) {
     sidebar.style.width = saved + 'px';
     sidebar.style.minWidth = saved + 'px';
+  } else {
+    sidebar.style.width = MIN + 'px';
+    sidebar.style.minWidth = MIN + 'px';
   }
   let startX = 0, startW = 0, dragging = false;
   const onMove = (e) => {

@@ -64,7 +64,16 @@ Object.assign(ChatApp.prototype, {
       const clean = (text || '').replace(/<\/?[a-zA-Z][^>]*>/g, (tag) =>
         tag.replace(/</g, '&lt;').replace(/>/g, '&gt;')
       );
-      return marked.parse(clean, {breaks: true});
+      const html = marked.parse(clean, {breaks: true});
+      const root = document.createElement('div');
+      root.innerHTML = html;
+      root.querySelectorAll('table').forEach((table) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'md-table-wrap';
+        table.parentNode.insertBefore(wrap, table);
+        wrap.appendChild(table);
+      });
+      return root.innerHTML;
     } catch(e) { return this._esc(text); }
   },
 });

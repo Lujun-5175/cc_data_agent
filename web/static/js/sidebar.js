@@ -627,6 +627,7 @@ Object.assign(ChatApp.prototype, {
     try {
       const r = await this._fetchAuth(`/api/sessions/${sid}`);
       const data = await r.json();
+      this._setContextUsage(data.context_usage || this._estimateContextUsageFromSession(data));
       (data.messages || []).forEach(m => {
         if (m.role === 'user') this._addUserBubble(m.content);
         else if (m.role === 'assistant') {

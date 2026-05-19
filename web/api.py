@@ -153,7 +153,7 @@ _IDLE_TIMEOUT = 1800  # 30 min before session is considered stale
 _SAFE_CONFIG_KEYS = frozenset({
     "model", "permission_mode", "max_tokens", "verbose", "thinking",
     "thinking_budget", "max_tool_output", "max_agent_depth",
-    "shell_policy", "log_level",
+    "shell_policy", "allowed_root", "log_level",
 })
 
 _WRITABLE_CONFIG_KEYS = frozenset({
@@ -258,9 +258,16 @@ class ChatSession:
         base = copy.deepcopy(base_config)
         if existing and existing.get("config"):
             base.update(existing["config"])
-        # YOLO: auto-approve all tool calls by default in web UI
-        # (user can toggle via the YOLO button in the settings bar)
-        base.setdefault("permission_mode", "accept-all")
+        if base.get("permission_mode") == "accept-all":
+            base["permission_mode"] = "auto"
+        if base_config.get("shell_policy") and base_config.get("shell_policy") != "allow":
+            base["shell_policy"] = base_config["shell_policy"]
+        if base_config.get("allowed_root"):
+            base["allowed_root"] = base_config["allowed_root"]
+        if base.get("thinking") is None:
+            base["thinking"] = True
+        # New sessions inherit the persisted default; fall back to prompts.
+        base.setdefault("permission_mode", "auto")
         self.config: dict = base
         self.config["_session_id"] = self.session_id
 
@@ -305,6 +312,9 @@ class ChatSession:
         ctx = runtime.get_session_ctx(self.session_id)
         ctx.agent_state = self._agent_state
         ctx.run_query = lambda msg: self.submit_prompt(msg)
+        ctx.web_emit_event = lambda event_type, data: self._broadcast(
+            ChatEvent(event_type, data)
+        )
 
     def _store_attachment(self, attachment: dict, raw: bytes | None = None) -> dict:
         mime_type = attachment.get("type") or ""
@@ -438,14 +448,18 @@ class ChatSession:
         events: list[dict] = []
         handled = None
         orig_broadcast = self._broadcast
+        import runtime
+        ctx = runtime.get_session_ctx(self.session_id)
 
         def capture_broadcast(event: ChatEvent):
             events.append({"type": event.type, "data": event.data})
 
         self._broadcast = capture_broadcast  # type: ignore
         try:
+            ctx.in_web_turn = True
             handled = self._handle_slash(line)
         finally:
+            ctx.in_web_turn = False
             self._broadcast = orig_broadcast  # type: ignore
             if handled != _ASYNC_HANDLED:
                 self._end_turn()
@@ -467,6 +481,8 @@ class ChatSession:
         done_event = threading.Event()
         handled = None
         orig_broadcast = self._broadcast
+        import runtime
+        ctx = runtime.get_session_ctx(self.session_id)
 
         def stream_broadcast(event: ChatEvent):
             event_callback({"type": event.type, "data": event.data})
@@ -475,11 +491,13 @@ class ChatSession:
 
         self._broadcast = stream_broadcast  # type: ignore
         try:
+            ctx.in_web_turn = True
             handled = self._handle_slash(line)
             # For long-running commands, wait until the bg thread finishes
             if handled == _ASYNC_HANDLED:
                 done_event.wait(timeout=600)  # 10 min max
         finally:
+            ctx.in_web_turn = False
             self._broadcast = orig_broadcast  # type: ignore
             if handled != _ASYNC_HANDLED:
                 self._end_turn()
@@ -1040,6 +1058,29 @@ class ChatSession:
         result["ollama_base_url"] = self.config.get("ollama_base_url",
                                                      "http://localhost:11434")
         return result
+
+    def get_context_usage(self) -> dict:
+        """Return approximate context-window usage for the current session."""
+        try:
+            from compaction import estimate_tokens, get_context_limit
+            model = self.config.get("model", "")
+            with self._msg_lock:
+                used = int(estimate_tokens(self.messages) or 0)
+            limit = int(get_context_limit(model, self.config) or 0)
+            pct = int((used / limit) * 100) if limit > 0 else 0
+            return {
+                "used_tokens": used,
+                "context_limit": limit,
+                "percent": max(0, min(100, pct)),
+                "model": model,
+            }
+        except Exception:
+            return {
+                "used_tokens": 0,
+                "context_limit": int(self.config.get("max_tokens", 0) or 0),
+                "percent": 0,
+                "model": self.config.get("model", ""),
+            }
 
     def update_config(self, updates: dict) -> dict:
         for k, v in updates.items():

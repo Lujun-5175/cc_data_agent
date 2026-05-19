@@ -28,7 +28,16 @@ class ChatApp {
     this._pendingImage = null;   // base64 data URL of attached image
     this._pendingFiles = [];     // non-image attachments sent with the next prompt
     this._yolo = false;          // YOLO mode — auto-approve all tool calls
-    this._permissionMode = 'accept-all';
+    this._permissionMode = 'auto';
+    this._model = '(not set)';
+    this._verbose = false;
+    this._thinking = true;
+    this._maxTokens = 40000;
+    this._thinkingBudget = 10000;
+    this._cwd = '';
+    this._contextUsage = {used_tokens: 0, context_limit: 0, percent: 0, model: ''};
+    this._ctxLastDisplay = '';
+    this._ctxCardOpen = false;
     this._turnActive = false;    // true during a turn, false after finishTurn
     this._wsReconnected = false; // true during WS reconnect replay guard
     this._batchScroll = false;   // suppress per-item scroll while loading history
@@ -58,7 +67,12 @@ class ChatApp {
         body: JSON.stringify({
           session_id: this.sessionId,
           config: {
+            model: this._model && this._model !== '(not set)' ? this._model : undefined,
             permission_mode: this._permissionMode || (this._yolo ? 'accept-all' : 'auto'),
+            verbose: !!this._verbose,
+            thinking: !!this._thinking,
+            max_tokens: this._maxTokens || 40000,
+            thinking_budget: this._thinkingBudget || 10000,
           },
         }),
       });
@@ -89,6 +103,16 @@ class ChatApp {
     }
     input.value = '';
     input.style.height = 'auto';
+
+    const clientSlash = this._handleClientSlash(text);
+    if (clientSlash) {
+      this._addUserBubble(text, this._pendingImage, this._pendingFiles.slice());
+      this._pendingImage = null;
+      this._pendingFiles = [];
+      this._renderAttachmentPreview();
+      this._addCommandResult(text, clientSlash);
+      return;
+    }
 
     // Reset tool summary for this turn — each question gets its own card
     this._toolSummary = null;
@@ -184,6 +208,161 @@ class ChatApp {
     }
   }
 
+  _handleClientSlash(text) {
+    if (!text.startsWith('/')) return '';
+    const parts = text.slice(1).trim().split(/\s+/);
+    const cmd = (parts[0] || '').toLowerCase();
+    const rawArg = parts.slice(1).join(' ').trim();
+    const arg = rawArg.toLowerCase();
+
+    if (cmd === 'permissions') {
+      const aliases = {'1':'auto', '2':'accept-all', '3':'manual', 'yolo':'accept-all'};
+      const current = this._permissionMode || (this._yolo ? 'accept-all' : 'auto');
+      if (!arg) {
+        const yoloState = this._yolo ? 'ON' : 'OFF';
+        return [
+          `Current permission mode: ${current}`,
+          `YOLO: ${yoloState}`,
+          'Use /permissions auto, /permissions accept-all, or /permissions manual.',
+        ].join('\n');
+      }
+      const next = aliases[arg] || arg;
+      const valid = ['auto', 'accept-all', 'manual'];
+      if (!valid.includes(next)) {
+        return `Unknown mode: ${arg}. Choose: auto, accept-all, manual`;
+      }
+      this._permissionMode = next;
+      if (this.setYolo) this.setYolo(next === 'accept-all');
+      if (this.sessionId && this.updateConfig) {
+        this.updateConfig('permission_mode', next).catch((e) => {
+          console.error('permissions:', e);
+        });
+      }
+      return `Permission mode set to: ${next}`;
+    }
+
+    if (cmd === 'thinking' && !arg) {
+      const next = !this._thinking;
+      this._thinking = next;
+      if (this.sessionId && this.updateConfig) {
+        this.updateConfig('thinking', next).catch((e) => console.error('thinking:', e));
+      }
+      return `Extended thinking: ${next ? 'ON' : 'OFF'}`;
+    }
+
+    if (cmd === 'verbose' && !arg) {
+      const next = !this._verbose;
+      this._verbose = next;
+      if (this.sessionId && this.updateConfig) {
+        this.updateConfig('verbose', next).catch((e) => console.error('verbose:', e));
+      }
+      return `Verbose mode: ${next ? 'ON' : 'OFF'}`;
+    }
+
+    if (cmd === 'status' && !arg) {
+      const msgCount = document.querySelectorAll('#messages .msg').length;
+      const metaCount = document.querySelectorAll('#messages .turn-meta').length;
+      const model = this._model || '(not set)';
+      const perms = this._permissionMode || (this._yolo ? 'accept-all' : 'auto');
+      return [
+        'Quick status:',
+        `  Model:       ${model}`,
+        `  Permissions: ${perms}`,
+        `  Session:     ${this.sessionId || '(not started)'}`,
+        `  Messages:    ${msgCount}`,
+        `  Turns:       ${metaCount}`,
+      ].join('\n');
+    }
+
+    if (cmd === 'context' && !arg) {
+      const bubbles = [...document.querySelectorAll('#messages .msg .bubble')];
+      const chars = bubbles.reduce((n, el) => n + (el.textContent || '').length, 0);
+      const estTokens = Math.floor(chars / 4);
+      return [
+        `Messages:         ${bubbles.length}`,
+        `Estimated tokens: ~${estTokens.toLocaleString()}`,
+        `Model:            ${this._model || '(not set)'}`,
+        `Max tokens:       ${(this._maxTokens || 40000).toLocaleString()}`,
+      ].join('\n');
+    }
+
+    if (cmd === 'cost' && !arg) {
+      const bubbles = [...document.querySelectorAll('#messages .msg .bubble')];
+      const chars = bubbles.reduce((n, el) => n + (el.textContent || '').length, 0);
+      const estTokens = Math.floor(chars / 4);
+      return [
+        'Quick estimate only:',
+        `Estimated total tokens: ~${estTokens.toLocaleString()}`,
+        'Exact provider cost is available in the backend session status.',
+      ].join('\n');
+    }
+
+    if (cmd === 'help' && !arg) {
+      return [
+        'Quick commands:',
+        '/status, /context, /cost, /permissions, /thinking, /verbose, /model, /cwd',
+        'Agent commands:',
+        '/brainstorm, /worker, /plan, /agent, /ssj, /monitor',
+        'Session commands:',
+        '/save, /load, /resume, /history, /checkpoint, /memory',
+      ].join('\n');
+    }
+
+    if (cmd === 'model' && !arg) {
+      return [
+        `Current model: ${this._model || '(not set)'}`,
+        'Use Settings to switch models instantly, or /model provider/name.',
+      ].join('\n');
+    }
+
+    if (cmd === 'model' && rawArg) {
+      this._model = rawArg.includes(':') && !rawArg.includes('/')
+        ? rawArg.replace(':', '/')
+        : rawArg;
+      if (this.sessionId && this.updateConfig) {
+        this.updateConfig('model', this._model).catch((e) => console.error('model:', e));
+      }
+      return `Model set to ${this._model}`;
+    }
+
+    if (cmd === 'cwd' && !arg) {
+      return this._cwd
+        ? `Working directory: ${this._cwd}`
+        : 'Working directory is not loaded in the web cache yet. Open Settings once or use backend /cwd for the exact path.';
+    }
+
+    return '';
+  }
+
+  _estimateContextUsageFromSession(data) {
+    const messages = Array.isArray(data?.messages) ? data.messages : [];
+    const config = data?.config || {};
+    let chars = 0;
+    for (const msg of messages) {
+      const content = msg?.content;
+      if (typeof content === 'string') {
+        chars += content.length;
+      } else if (Array.isArray(content)) {
+        for (const part of content) {
+          if (typeof part === 'string') chars += part.length;
+          else if (part && typeof part === 'object' && typeof part.text === 'string') chars += part.text.length;
+        }
+      }
+    }
+    const used = Math.max(0, Math.floor(chars / 4));
+    const limit = Math.max(
+      0,
+      Number(config.max_tokens || this._maxTokens || 0),
+    );
+    const percent = limit > 0 ? (used / limit) * 100 : 0;
+    return {
+      used_tokens: used,
+      context_limit: limit,
+      percent,
+      model: config.model || this._model || '',
+    };
+  }
+
   _pollForResult() {
     if (this._polling) return;
     this._polling = true;
@@ -196,6 +375,7 @@ class ChatApp {
         const r = await fetch(`/api/sessions/${this.sessionId}`, {credentials:'same-origin'});
         if (!r.ok) { this._polling = false; this._removeActivity(); return; }
         const data = await r.json();
+        this._setContextUsage(data.context_usage || this._estimateContextUsageFromSession(data));
         const secs = this._pollCount * 2;
         this._showActivity('', 'Working',
           data.busy ? `running... (${secs}s)` : 'finishing...');
@@ -229,6 +409,7 @@ class ChatApp {
   _connectWS(sid) {
     this._disconnectWS();
     this._wsRetries = (this._wsRetries || 0);
+    const isReconnect = this._wsRetries > 0;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}/api/events`;
     try {
@@ -242,7 +423,7 @@ class ChatApp {
 
     this.ws.onopen = () => {
       this._wsRetries = 0;
-      this._wsReconnected = true;
+      this._wsReconnected = isReconnect;
       this.ws.send(JSON.stringify({session_id: sid}));
       this.setStatus('connected');
     };
@@ -391,7 +572,7 @@ class ChatApp {
       return;
     }
     // Clear reconnect guard on first meaningful event
-    if (evt.type === 'text_chunk' || evt.type === 'tool_start' || evt.type === 'turn_done' || evt.type === 'tool_end') {
+    if (evt.type === 'text_chunk' || evt.type === 'tool_start' || evt.type === 'turn_done' || evt.type === 'tool_end' || evt.type === 'status') {
       this._wsReconnected = false;
     }
     switch (evt.type) {
@@ -467,6 +648,7 @@ class ChatApp {
     this._toolSummaryEl = null; this._toolCounter = 0; this._approvalEl = null;
     this._pendingApproval = false; this._turnActive = false;
     this._thinkScrollPending = false; this._batchScroll = false;
+    this._setContextUsage(null);
   }
 
   _addUserBubble(text, imgDataUrl, attachments = []) {
@@ -877,6 +1059,7 @@ class ChatApp {
       meta.textContent = `${(tokIn||0).toLocaleString()} tokens in / ${(tokOut||0).toLocaleString()} tokens out`;
       document.getElementById('messages').appendChild(meta);
     }
+    this._refreshContextUsage();
     this._scrollBottom();
   }
 
@@ -884,6 +1067,7 @@ class ChatApp {
     try {
       const r = await this._fetchAuth(`/api/sessions/${this.sessionId}`);
       const data = await r.json();
+      this._setContextUsage(data.context_usage || this._estimateContextUsageFromSession(data));
       const msgs = data.messages || [];
       const last = msgs[msgs.length - 1];
       if (last && last.role === 'assistant') {
@@ -941,5 +1125,110 @@ class ChatApp {
     const txt = document.getElementById('status-text');
     dot.className = 'dot' + (state==='disconnected'?' off':'') + (state==='running'?' busy':'');
     txt.textContent = state;
+  }
+
+  _setContextUsage(meta) {
+    const indicator = document.getElementById('ctx-indicator');
+    const ring = document.getElementById('ctx-ring');
+    const center = document.getElementById('ctx-center');
+    const pctEl = document.getElementById('ctx-tooltip-pct');
+    const detailEl = document.getElementById('ctx-tooltip-detail');
+    if (!indicator || !ring || !center || !pctEl || !detailEl) return;
+
+    if (!meta || (meta.used_tokens == null && meta.context_limit == null && meta.percent == null)) {
+      const circumference = 2 * Math.PI * 11;
+      ring.style.strokeDasharray = `${circumference.toFixed(2)}`;
+      ring.style.strokeDashoffset = `${circumference.toFixed(2)}`;
+      center.textContent = '--';
+      pctEl.textContent = '--';
+      detailEl.textContent = 'Waiting for session data…';
+      indicator.dataset.level = 'low';
+      this._contextUsage = {used_tokens: 0, context_limit: 0, percent: 0, model: this._model || ''};
+      this._ctxLastDisplay = '';
+      return;
+    }
+
+    const used = Math.max(0, Number(meta?.used_tokens || 0));
+    const limit = Math.max(0, Number(meta?.context_limit || this._maxTokens || 0));
+    const rawPercent = Number.isFinite(Number(meta?.percent))
+      ? Number(meta.percent)
+      : (limit > 0 ? (used / limit) * 100 : 0);
+    const percent = Math.max(0, Math.min(100, rawPercent));
+    this._contextUsage = {used_tokens: used, context_limit: limit, percent, model: meta?.model || this._model || ''};
+
+    const circumference = 2 * Math.PI * 11;
+    const offset = circumference * (1 - percent / 100);
+    ring.style.strokeDasharray = `${circumference.toFixed(2)}`;
+    ring.style.strokeDashoffset = `${offset.toFixed(2)}`;
+    const pctLabel = `${percent.toFixed(percent < 10 ? 1 : 0)}%`;
+    const centerLabel = percent < 1
+      ? '<1'
+      : (percent < 10 ? percent.toFixed(1) : `${Math.round(percent)}`).replace('.0', '');
+    center.textContent = centerLabel;
+    pctEl.textContent = `${pctLabel} used`;
+    detailEl.textContent = `${this._formatCompactTokens(used)} / ${this._formatCompactTokens(limit)}${this._contextUsage.model ? ` · ${this._contextUsage.model}` : ''}`;
+
+    const level = percent >= 80 ? 'high' : percent >= 50 ? 'mid' : 'low';
+    indicator.dataset.level = level;
+
+    const displaySig = `${used}|${limit}|${pctLabel}|${this._contextUsage.model || ''}`;
+    if (displaySig !== this._ctxLastDisplay) {
+      indicator.classList.remove('ctx-updated');
+      void indicator.offsetWidth;
+      indicator.classList.add('ctx-updated');
+      this._ctxLastDisplay = displaySig;
+    }
+  }
+
+  _formatCompactTokens(n) {
+    const num = Math.max(0, Number(n || 0));
+    if (num >= 1000000) return `${(num / 1000000).toFixed(num >= 10000000 ? 0 : 1).replace('.0', '')}M`;
+    if (num >= 1000) return `${(num / 1000).toFixed(num >= 100000 ? 0 : 1).replace('.0', '')}k`;
+    return `${Math.round(num)}`;
+  }
+
+  async _refreshContextUsage() {
+    if (!this.sessionId) {
+      this._setContextUsage({used_tokens: 0, context_limit: this._maxTokens || 0, percent: 0, model: this._model || ''});
+      return;
+    }
+    try {
+      const r = await this._fetchAuth(`/api/sessions/${this.sessionId}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      this._setContextUsage(data.context_usage || this._estimateContextUsageFromSession(data));
+    } catch (e) {
+      console.warn('[chat] _refreshContextUsage failed:', e);
+    }
+  }
+
+  _setContextCardOpen(open) {
+    this._ctxCardOpen = !!open;
+    const indicator = document.getElementById('ctx-indicator');
+    if (indicator) indicator.classList.toggle('is-open', this._ctxCardOpen);
+  }
+
+  _setupContextCard() {
+    const indicator = document.getElementById('ctx-indicator');
+    if (!indicator || this._ctxCardReady) return;
+    this._ctxCardReady = true;
+    indicator.setAttribute('tabindex', '0');
+    indicator.setAttribute('role', 'button');
+    indicator.setAttribute('aria-label', 'Toggle context window usage details');
+    indicator.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._setContextCardOpen(!this._ctxCardOpen);
+    });
+    indicator.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        this._setContextCardOpen(!this._ctxCardOpen);
+      } else if (e.key === 'Escape') {
+        this._setContextCardOpen(false);
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!indicator.contains(e.target)) this._setContextCardOpen(false);
+    });
   }
 }
